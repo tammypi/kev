@@ -119,7 +119,7 @@ def ones(*args, **kwargs):
 def startup(monkeypatch):
     """Replace weight loading and the socket server, leaving serve.main, selection and option defaults intact."""
     loaded = []
-    model = SimpleNamespace(hybrid=True, backend="torch", dtype="float32")
+    model = SimpleNamespace(hybrid=True, backend="torch", dtype="float32", lm=SimpleNamespace(hf_device_map={"layers.0": 0, "layers.1": 1}))
     class Checkpoint:
         created = []
         def __init__(self, run, base=None):
@@ -172,6 +172,40 @@ def test_serve_passes_local_base_to_checkpoint(startup, monkeypatch, tmp_path):
     serve.main()
     assert startup[0][0] == "cpu"
     assert serve.Checkpoint.created == [("fixture/model", str(base))]
+
+
+@pytest.mark.parametrize("environment", [False, True])
+def test_serve_sharding_requires_cuda_and_skips_single_gpu_defaults(startup, monkeypatch, environment):
+    if environment:
+        monkeypatch.setenv("KEV_DEVICE_MAP", "balanced")
+    else:
+        sys.argv += ["--device-map", "balanced"]
+    def probe(command, **kwargs):
+        assert command[-2:] == ["cuda", "bfloat16"]
+        return SimpleNamespace(stdout=reported("cuda"))
+    monkeypatch.setattr(subprocess, "run", probe)
+    serve.main()
+    device, opts = startup[0]
+    assert device == "cuda" and opts.device_map == "balanced"
+    assert not opts.cuda_graphs and not opts.fused
+
+
+def test_serve_sharding_does_not_fall_back_to_cpu(startup, monkeypatch):
+    sys.argv += ["--device-map", "balanced"]
+    def failed(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, "probe")
+    monkeypatch.setattr(subprocess, "run", failed)
+    with pytest.raises(RuntimeError, match="Device probe failed"):
+        serve.main()
+    assert not startup
+
+
+@pytest.mark.parametrize("device", ["cpu", "mps"])
+def test_serve_sharding_rejects_non_cuda_device(startup, device):
+    sys.argv += ["--device-map", "balanced", "--device", device]
+    with pytest.raises(SystemExit) as error:
+        serve.main()
+    assert error.value.code == 2 and not startup
 
 
 @pytest.mark.parametrize("requested", ["auto", "cuda"])

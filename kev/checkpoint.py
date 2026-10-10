@@ -20,7 +20,7 @@ import importlib.util
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import torch
@@ -117,6 +117,9 @@ class LoadOptions:
     fused        rewrite a merged hybrid backbone on CUDA with fused Triton kernels (kev.fused_qwen35; needs
                  flash-linear-attention fused_qwen35.FLA_VERSION and refuses any other). None = off; kev.serve turns it on
                  for CUDA when fused_available() (KEV_FUSED=0 to decline). Equal to the reference layers up to bf16 rounding.
+    device_map   "balanced" distributes whole decoder layers across visible CUDA GPUs. Loads on CPU first, then
+                 dispatches the backbone; needs host RAM for the checkpoint. CUDA graphs and Kev's fused rewrites are
+                 not supported on this path. None keeps the single-device loader.
     """
     dtype: torch.dtype | None = None
     merge: bool = True
@@ -126,13 +129,14 @@ class LoadOptions:
     backend: str | None = None
     cuda_graphs: bool | None = None
     fused: bool | None = None
+    device_map: str | None = None
 
     BACKENDS = (None, "torch", "mlx", "auto")
 
     @classmethod
     def from_env(cls, env=os.environ):
         """KEV_DTYPE=bf16|fp16|fp32, KEV_MERGE=0, KEV_ATTN=sdpa|eager, KEV_LORA_SCALE, KEV_TEMPERATURE, KEV_BACKEND=torch|mlx|auto,
-        KEV_CUDA_GRAPHS=0|1, KEV_FUSED=0|1.
+        KEV_CUDA_GRAPHS=0|1, KEV_FUSED=0|1, KEV_DEVICE_MAP=balanced.
         For command-line entry points only; library code passes an explicit LoadOptions. Explicit values that equal a
         library default are kept (fp32 as torch.float32, "torch" as a string) so a caller with its own default, like
         kev.serve, can tell "asked for it" from "did not say"."""
@@ -143,7 +147,7 @@ class LoadOptions:
                    lora_scale=float(env.get("KEV_LORA_SCALE", "1")),
                    temperature=float(env["KEV_TEMPERATURE"]) if env.get("KEV_TEMPERATURE") else None, backend=backend,
                    cuda_graphs={"0": False, "1": True}.get(env.get("KEV_CUDA_GRAPHS", "")),
-                   fused={"0": False, "1": True}.get(env.get("KEV_FUSED", "")))
+                   fused={"0": False, "1": True}.get(env.get("KEV_FUSED", "")), device_map=env.get("KEV_DEVICE_MAP") or None)
 
 
 def mlx_available():
@@ -242,6 +246,9 @@ class Checkpoint:
         """-> (tokenizer, model) in eval mode with the LoRA applied (or the full backbone loaded) and the pointer head loaded. The model is a
         DecisionModel (torch) or an MLXDecisionModel (backend mlx); both expose the same scoring interface."""
         meta = self.meta
+        if opts.device_map is not None:
+            from .sharding import validate
+            validate(device, opts)
         if self.full and opts.lora_scale != 1: raise ValueError("lora_scale interpolates an adapter; a full-weight checkpoint has none")
         tok = load_tokenizer(self.base, revision=meta.base_revision)
         m = self._load_mlx(tok, opts) if self.backend(device, opts) == "mlx" else self._load_torch(tok, device, opts)
@@ -268,7 +275,12 @@ class Checkpoint:
         return MLXDecisionModel(lm, pad_id(tok), head_dim=self.meta.head_dim)
 
     def _load_torch(self, tok, device, opts):
-        m, merged = self._full_torch(tok, device, opts) if self.full else self._adapted_torch(tok, device, opts)
+        load_device = "cpu" if opts.device_map else device
+        load_opts = replace(opts, attn=opts.attn or "sdpa") if opts.device_map else opts
+        m, merged = self._full_torch(tok, load_device, load_opts) if self.full else self._adapted_torch(tok, load_device, load_opts)
+        if opts.device_map:
+            from .sharding import shard
+            return shard(m)
         serving = str(device).startswith("cuda") and m.hybrid
         if opts.fused and serving and merged:   # fused projections need plain (merged or full) weights
             from .fused_qwen35 import fuse

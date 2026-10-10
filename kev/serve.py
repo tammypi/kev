@@ -312,6 +312,8 @@ def models():
             "prefix_cache": {"size": s.prefix_cache.size, "min_state_tokens": s.prefix_cache.min_tokens, "max_tokens": s.prefix_cache.max_tokens, "hits": s.prefix_cache.hits,
                              "misses": s.prefix_cache.misses, "cached_states": len(s.prefix_cache.entries), "oom_retries": s.prefix_cache.oom_retries},
             "batches": {"count": s.batches, "requests": s.batched_requests, "queued": s.queue.qsize()}}
+    if placement := getattr(getattr(s.model, "lm", None), "hf_device_map", None):
+        card["device_map"] = placement
     return {"models": [{"name": name, **card} for name in MODEL_NAMES]}
 
 
@@ -337,19 +339,25 @@ def main():
     ap.add_argument("--host", default="127.0.0.1", help="interface to bind; 0.0.0.0 to serve beyond this machine (a container, a VM behind a proxy)")
     ap.add_argument("--port", type=int, default=8008)
     ap.add_argument("--device", choices=("auto", *DEVICES), default="auto", help=DEVICE_HELP)
+    ap.add_argument("--device-map", choices=("balanced",), help="split the model across visible CUDA GPUs; requires host RAM for loading and disables CUDA graphs and Kev fused rewrites")
     a = ap.parse_args()
     run = a.run if is_hub_id(a.run) or os.path.exists(f"{a.run}/head.pt") else a.fallback
     if run != a.run: print(f"{a.run} not found, falling back to {run}")
     opts = LoadOptions.from_env()
+    if a.device_map: opts = replace(opts, device_map=a.device_map)
+    if opts.device_map and a.device in ("cpu", "mps"):
+        ap.error("--device-map balanced requires --device cuda (or auto)")
     if opts.backend is None: opts = replace(opts, backend="auto")   # serving default: MLX for the hybrid Qwen3.5 checkpoints on Apple Silicon (LoadOptions.backend); KEV_BACKEND=torch to decline
-    dev, ck = _serving_device(a.device, opts, run, a.base)
+    dev, ck = _serving_device("cuda" if opts.device_map else a.device, opts, run, a.base)
     if dev == "mps" and opts.attn is None: opts = replace(opts, attn="sdpa")   # serving default on Apple GPUs (parity measured)
     if dev != "cpu" and opts.dtype is None: opts = replace(opts, dtype=torch.bfloat16)   # serving default: 2-4.5x faster than fp32 on an L4, same answers (LoadOptions.dtype); KEV_DTYPE=fp32 for the exact path
-    cuda_optimizations = dev == "cuda" and torch.version.hip is None   # these serving paths are measured on NVIDIA
+    cuda_optimizations = dev == "cuda" and torch.version.hip is None and not opts.device_map   # these serving paths are measured on one NVIDIA GPU
     if cuda_optimizations and opts.cuda_graphs is None: opts = replace(opts, cuda_graphs=True)   # serving default: a pass is ~2,000 kernel launches, so replaying graphs cuts warm latency several-fold (kev.cuda_graphs); KEV_CUDA_GRAPHS=0 to decline
     fused_default = cuda_optimizations and opts.fused is None
     if fused_default: opts = replace(opts, fused=fused_available())   # serving default: fused Qwen3.5 kernels, ~1/3 less GPU time per batch (kev.fused_qwen35), when fla is installed; KEV_FUSED=0 to decline, KEV_FUSED=1 to insist
     tok, model = ck.load(dev, opts)
+    if opts.device_map:
+        print(f"model split across visible CUDA GPUs (process-local indices): {model.lm.hf_device_map}; CUDA graphs and Kev fused rewrites off", flush=True)
     if fused_default and not opts.fused and model.hybrid: print("fused Qwen3.5 kernels off: install the flash-linear-attention version kev/fused_qwen35.py pins (FLA_VERSION) to turn them on")
     app.state.server = Server(ck, tok, model, dev)
     print(f"serving {ck.requested} ({ck.path}) with base {ck.base} on {dev} via {model.backend} ({model.dtype}) {a.host}:{a.port}; states over {SERVE_MAX_STATE:,} tokens "

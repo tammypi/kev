@@ -98,6 +98,21 @@ On Apple Silicon, serving a hybrid checkpoint with the default backend uses MLX 
 CPU serving keeps the fp32 default; `KEV_DTYPE=bf16` reduces weight memory if needed. ROCm uses the eager serving path by default;
 the fused-kernel and graph defaults are enabled only on NVIDIA builds.
 
+To split a checkpoint that exceeds one GPU's memory across two GPUs, use layer sharding:
+
+```bash
+CUDA_VISIBLE_DEVICES=2,3 uv run --extra serve python -m kev.serve \
+  --run /path/to/kev-27b --device cuda --device-map balanced --port 8009
+```
+
+Add `--base /path/to/Qwen3.8-27B` only for a LoRA checkpoint. A full-weight checkpoint loads its own weights.
+The loader stages weights and any adapter in host RAM, then balances whole decoder layers across the visible GPUs.
+Allow host RAM for the full checkpoint plus loading overhead. It reserves 20% of each GPU's free memory when planning
+weight placement; long requests can still exceed that reserve. This path disables CUDA graphs and Kev's fused rewrites,
+and processes requests sequentially. The startup log and `/v1/models` show `device_map` using process-local indices
+(`0` and `1` correspond to physical GPUs `2` and `3` here). `KEV_DEVICE_MAP=balanced` is the equivalent environment option.
+Multi-GPU latency and 27B capacity need validation on the target hardware.
+
 In another terminal, send it a ticket:
 
 ```bash
@@ -313,7 +328,7 @@ The attention mask lets a token read the state and its own question, but not oth
 
 Qwen3.5 and Qwen3.8 mix attention layers with Gated DeltaNet layers, which are recurrent and ignore attention masks. For those models, which is every current Kev, each question runs as its own row: the state followed by that question, with the same positions as above. The rows are independent, so isolation is exact, and the server and `DecisionModel.probs()` compute the state once and reuse its cache for every row. `forward()`, which `kev.benchmark` scores and every published number comes from, keeps the plain rows and runs the state once per question; the two agree to fp32 rounding. On attention-only models the rows and the mask above give identical probabilities (`tests/test_model.py`).
 
-Kev-27B uses the same design on `Qwen/Qwen3.8-27B`, with two differences. Its base is Qwen's post-trained release rather than a `-Base` checkpoint, and we don't know what it was post-trained on. And every backbone weight is trained, not just an adapter, and kept in bf16, so the checkpoint is the whole model: 51 GB of bf16 weights plus the pointer head. It serves in bf16 only (about 66 GB resident with the serving buffers), which is why it needs an 80 GB card. On Apple Silicon the MLX backend loads those weights as they are, with no merge (see [Serving Performance](#serving-performance)); we expect that to fit a 96–128 GB Mac but haven't measured it. Its served probabilities stay within 0.022 of the evaluation path on an H200 (`runs/serving-27b-r23`).
+Kev-27B uses the same design on `Qwen/Qwen3.8-27B`, with two differences. Its base is Qwen's post-trained release rather than a `-Base` checkpoint, and we don't know what it was post-trained on. And every backbone weight is trained, not just an adapter, and kept in bf16, so the checkpoint is the whole model: 51 GB of bf16 weights plus the pointer head. It serves in bf16 only (about 66 GB resident with the single-GPU serving buffers), which is why that path needs an 80 GB card. The `--device-map balanced` path can split its layers across GPUs with those buffers disabled; capacity and latency on that path need validation on the target hardware. On Apple Silicon the MLX backend loads those weights as they are, with no merge (see [Serving Performance](#serving-performance)); we expect that to fit a 96–128 GB Mac but haven't measured it. Its served probabilities stay within 0.022 of the evaluation path on an H200 (`runs/serving-27b-r23`).
 
 The pointer head scores each option's `</opt>` hidden state against the question's `<decide>` hidden state. A softmax turns those scores into probabilities. Because `<decide>` comes last, it can attend to the full option list.
 
