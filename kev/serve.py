@@ -2,8 +2,8 @@
 
 Run: uv run --extra serve python -m kev.serve --run runs/kev --port 8008
 
-For a LoRA checkpoint, `--base /absolute/path/to/base` loads its tokenizer, config and weights from that local
-directory instead of downloading the base named in `head.pt`.
+`--base /absolute/path/to/base` loads the tokenizer locally instead of downloading it from the base named in
+`head.pt`. LoRA checkpoints also load the base weights there; full-weight checkpoints load their own weights.
 
 TypeSafe-compatible: POST /v1/systemone, GET /v1/models, the `x-typesafe-request-id` response header, and bearer auth
 when KEV_API_KEY is set (unset = open server, the local default). Demo extras: POST /v1/systemone/permute (one Choice
@@ -334,7 +334,7 @@ def _serving_device(requested, opts, run, base=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", default="runs/kev")
-    ap.add_argument("--base", help="absolute local base-model directory for a LoRA checkpoint; avoids downloading the base recorded in head.pt")
+    ap.add_argument("--base", help="absolute local base directory for the tokenizer and, for LoRA checkpoints, base weights; full checkpoints retain their own weights")
     ap.add_argument("--fallback", default="runs/smoke")
     ap.add_argument("--host", default="127.0.0.1", help="interface to bind; 0.0.0.0 to serve beyond this machine (a container, a VM behind a proxy)")
     ap.add_argument("--port", type=int, default=8008)

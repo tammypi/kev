@@ -105,7 +105,8 @@ CUDA_VISIBLE_DEVICES=2,3 uv run --extra serve python -m kev.serve \
   --run /path/to/kev-27b --device cuda --device-map balanced --port 8009
 ```
 
-Add `--base /path/to/Qwen3.8-27B` only for a LoRA checkpoint. A full-weight checkpoint loads its own weights.
+Add `--base /path/to/Qwen3.8-27B` to load the tokenizer locally. LoRA checkpoints also load base weights there;
+full-weight checkpoints always load their trained weights from `--run`.
 The loader stages weights and any adapter in host RAM, then balances whole decoder layers across the visible GPUs.
 Allow host RAM for the full checkpoint plus loading overhead. It reserves 20% of each GPU's free memory when planning
 weight placement; long requests can still exceed that reserve. This path disables CUDA graphs and Kev's fused rewrites,

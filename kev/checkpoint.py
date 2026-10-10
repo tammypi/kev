@@ -181,7 +181,6 @@ class Checkpoint:
             path = Path(base)
             if not path.is_absolute(): raise ValueError(f"--base must be an absolute path, got {base!r}")
             if not path.is_dir(): raise ValueError(f"--base does not name a directory: {base}")
-            if self.full: raise ValueError("--base only applies to a LoRA checkpoint; this checkpoint contains full weights")
             self.base = str(path)
 
     def file(self, name):

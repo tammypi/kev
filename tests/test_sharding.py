@@ -75,6 +75,24 @@ def test_environment_option():
     assert LoadOptions.from_env({}).device_map is None
 
 
+def test_full_checkpoint_local_base_supplies_tokenizer_not_weights(checkpoint, monkeypatch, tmp_path):
+    ck = checkpoint("full")
+    local_base = tmp_path / "tokenizer-only"
+    local_base.mkdir()
+    loaded = []
+    def tokenizer(name, revision=None):
+        loaded.append(name)
+        return SimpleNamespace(pad_token_id=0)
+    monkeypatch.setattr("kev.checkpoint.load_tokenizer", tokenizer)
+    _, reference = ck.load("cpu")
+    override = Checkpoint(ck.path, base=str(local_base))
+    _, actual = override.load("cpu")
+    assert loaded == [ck.meta.base, str(local_base)]
+    assert override.meta.base == ck.meta.base
+    assert all(torch.equal(value, actual.lm.state_dict()[key]) for key, value in reference.lm.state_dict().items())
+    check_probabilities(reference, actual, atol=0, rtol=0)
+
+
 def test_balanced_plan_keeps_layers_whole_and_refuses_offload(checkpoint, monkeypatch):
     _, model = checkpoint("full").load("cpu")
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
