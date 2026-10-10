@@ -171,6 +171,7 @@ def evaluate_records(records, predictor, directory, temperature=1.0, heldout_sou
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", help="checkpoint dir or Hub id (local scoring)")
+    ap.add_argument("--base", help="absolute local base-model directory for a LoRA checkpoint; avoids downloading the base recorded in head.pt")
     ap.add_argument("--remote", help="base URL of a System One-compatible endpoint to score instead of a local checkpoint")
     ap.add_argument("--remote-model", default="kev-latest")
     ap.add_argument("--remote-concurrency", type=int, default=1, help="requests kept in flight against --remote (1 = sequential); rows and their order do not depend on it")
@@ -204,10 +205,11 @@ def main():
         context, skip_overlong = manifest.get("context", CONTEXT), bool(manifest.get("eval_only"))
     if a.date_facts:
         records = [{**r, "state": with_date_facts(r["state"])} for r in records]
-    predictor = RemotePredictor(a.remote, a.remote_model, os.environ.get("KEV_REMOTE_API_KEY", "local"), concurrency=a.remote_concurrency) if a.remote else LocalPredictor(a.run, a.device, opts, context=context)
+    if a.remote and a.base: ap.error("--base is only valid with --run")
+    predictor = RemotePredictor(a.remote, a.remote_model, os.environ.get("KEV_REMOTE_API_KEY", "local"), concurrency=a.remote_concurrency) if a.remote else LocalPredictor(a.run, a.device, opts, context=context, base=a.base)
     scorer = RotationAveraged(predictor, a.rotations) if a.rotations > 1 else predictor
     report, _ = evaluate_records(records, scorer, a.out, heldout_sources=tuple(heldout), skip_overlong=skip_overlong)
-    report.update(suite_sha256=source_hash, data=a.data, date_facts=a.date_facts, rotations=a.rotations, run=a.run or a.remote, split=split,
+    report.update(suite_sha256=source_hash, data=a.data, date_facts=a.date_facts, rotations=a.rotations, run=a.run or a.remote, base=a.base, split=split,
                   calibration_applied=predictor.temperature != 1.0 if not a.remote else None,
                   environment=predictor.environment if not a.remote else None,   # the kernel set (kev.predictors.kernel_environment)
                   remote={"base_url": a.remote, "requested_model": a.remote_model, "served_model": predictor.served_model, "concurrency": a.remote_concurrency} if a.remote else None)

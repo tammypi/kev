@@ -369,7 +369,7 @@ def batch_loss(model, a, batch, dev, anchors, anchor_sources, autocast):
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base", default="Qwen/Qwen3-0.6B-Base")
+    ap.add_argument("--base", default="Qwen/Qwen3-0.6B-Base", help="Hub base ID or local base-model directory; use an absolute path to load local weights")
     ap.add_argument("--n_per_source", type=int, default=1000)
     ap.add_argument("--epochs", type=int, default=1)
     ap.add_argument("--lr", type=float, default=2e-4)
@@ -539,6 +539,7 @@ def main():
     if a.anchor: print(f"anchor targets: {len(anchors)} records from {a.anchor}", flush=True)
     anchor_sources = set(a.anchor_sources.split(",")) if a.anchor_sources else None
 
+    init_checkpoint = Checkpoint(a.init_from) if a.init_from else None
     tok = load_tokenizer(a.base, revision=revision)
     model = DecisionModel(a.base, tok, dev, lora=None if a.full_ft else a.lora, revision=revision, head_dim=a.head_dim, lora_targets=a.lora_targets,
                           option_isolation=bool(a.option_isolation), special_embeddings=bool(a.special_embeddings),
@@ -547,13 +548,14 @@ def main():
         model.lm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model.lm.config.use_cache = False
     # what this run will save as head.pt; also the architecture a warm start must match
-    meta = Meta(base=a.base, base_revision=revision, lora=0 if a.full_ft else a.lora, head_dim=a.head_dim, option_isolation=bool(a.option_isolation),
+    meta_base = init_checkpoint.meta.base if init_checkpoint and Path(a.base).is_absolute() else a.base
+    meta = Meta(base=meta_base, base_revision=revision, lora=0 if a.full_ft else a.lora, head_dim=a.head_dim, option_isolation=bool(a.option_isolation),
                 special_embeddings=bool(a.special_embeddings), weights_dtype=a.weights_dtype, holdout=holdout, weights="full" if a.full_ft else "lora")
     init_source = None
-    if a.init_from:
+    if init_checkpoint:
         # delta mode (PR #9, Radexito): start from an already trained adapter (or full backbone) + pointer head instead of the
         # base model, so a fine-tune on new data keeps what the released checkpoint knows
-        init_source = Checkpoint(a.init_from).warm_start(model, meta)
+        init_source = init_checkpoint.warm_start(model, meta)
         print(f"delta: warm start from {init_source['resolved']}: {init_source['tensors']} {meta.weights} tensors and the pointer head loaded", flush=True)
     if a.pass_tokens_max and not model.hybrid:
         # pass_tokens is exact for the row form and the shared prefix, which a hybrid backbone always runs; an attention-only

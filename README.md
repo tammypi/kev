@@ -83,7 +83,7 @@ uv sync --extra serve
 uv run --extra serve python -m kev.serve --run jaredpalmer/kev-4b --port 8009
 ```
 
-This starts Kev-4B on your machine: CUDA or ROCm if you have a GPU, MLX on Apple Silicon. The first run downloads the adapter and the base model. `--run` also accepts a local checkpoint directory or a Hub revision like `jaredpalmer/kev-4b@qwen3`.
+This starts Kev-4B on your machine: CUDA or ROCm if you have a GPU, MLX on Apple Silicon. The first run downloads the adapter and the base model. `--run` also accepts a local checkpoint directory or a Hub revision like `jaredpalmer/kev-4b@qwen3`. If you already have a LoRA checkpoint's base, pass its absolute path with `--base /models/Qwen3.5-4B-Base` to `kev.benchmark` or `kev.serve` to avoid another Hub download. `kev.train --base` accepts the same path; with `--init_from`, Kev preserves the source checkpoint's base ID in the new checkpoint.
 
 Use `--device cpu` to skip accelerator discovery, or `--device cuda` / `--device mps` to require that accelerator.
 The default, `--device auto`, tests an allocation and matrix multiplication in a separate process before loading weights.

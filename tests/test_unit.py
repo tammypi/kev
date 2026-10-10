@@ -708,6 +708,20 @@ def test_loader_rule_needs_head_pt_and_files_to_agree(tmp_path):
             Checkpoint(d).full
 
 
+def test_checkpoint_base_override_requires_an_absolute_local_directory(tmp_path):
+    from kev.checkpoint import Checkpoint, Meta, write_meta
+    run, base = tmp_path / "run", tmp_path / "base"
+    run.mkdir(); base.mkdir()
+    write_meta(run, Meta(base="Qwen/Qwen3.5-4B-Base", weights="lora"))
+    (run / "adapter_config.json").write_text("{}", encoding="utf-8")
+    ck = Checkpoint(run, base=str(base))
+    assert ck.base == str(base) and ck.meta.base == "Qwen/Qwen3.5-4B-Base"
+    with pytest.raises(ValueError, match="absolute path"):
+        Checkpoint(run, base="base")
+    with pytest.raises(ValueError, match="does not name a directory"):
+        Checkpoint(run, base=str(tmp_path / "missing"))
+
+
 def test_full_weight_warm_start(tiny_base, tmp_path, monkeypatch):
     """--init_from a full checkpoint copies every backbone tensor over the base (coverage checked) and records the shard
     hash; a LoRA run cannot start from full weights."""

@@ -121,8 +121,11 @@ def startup(monkeypatch):
     loaded = []
     model = SimpleNamespace(hybrid=True, backend="torch", dtype="float32")
     class Checkpoint:
-        def __init__(self, run):
+        created = []
+        def __init__(self, run, base=None):
             self.requested = self.path = run
+            self.base = base or "checkpoint-base"
+            self.created.append((run, base))
         def load(self, dev, opts):
             loaded.append((dev, opts))
             return None, model
@@ -161,6 +164,14 @@ def test_serve_main_selects_device_and_defaults(startup, monkeypatch, requested,
     assert opts.cuda_graphs == (True if dev == "cuda" and hip is None else None)
     assert opts.fused == (True if dev == "cuda" and hip is None else None)
     assert startup[1] == {"host": "127.0.0.1", "port": 8019}
+
+
+def test_serve_passes_local_base_to_checkpoint(startup, monkeypatch, tmp_path):
+    base = tmp_path / "base"; base.mkdir()
+    sys.argv += ["--device", "cpu", "--base", str(base)]
+    serve.main()
+    assert startup[0][0] == "cpu"
+    assert serve.Checkpoint.created == [("fixture/model", str(base))]
 
 
 @pytest.mark.parametrize("requested", ["auto", "cuda"])
@@ -291,6 +302,20 @@ def test_benchmark_skips_the_probe_for_cpu_and_remote(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["kev.benchmark", "--remote", "http://127.0.0.1:9", "--data", str(data),
                                       "--device", "cuda", "--out", str(remote)])
     benchmark.main()
+
+
+def test_benchmark_passes_local_base_to_predictor(tmp_path, monkeypatch):
+    data, base = tmp_path / "data.jsonl", tmp_path / "base"
+    data.write_text("", encoding="utf-8"); base.mkdir()
+    out = tmp_path / "out"; out.mkdir()
+    from kev import benchmark
+    seen = []
+    monkeypatch.setattr(benchmark, "load_records", lambda path: [])
+    monkeypatch.setattr(benchmark, "evaluate_records", _benchmark_report)
+    monkeypatch.setattr(benchmark, "LocalPredictor", lambda *a, **k: seen.append(k["base"]) or SimpleNamespace(temperature=1.0, environment={}))
+    monkeypatch.setattr(sys, "argv", ["kev.benchmark", "--run", "fixture", "--base", str(base), "--data", str(data), "--device", "cpu", "--out", str(out)])
+    benchmark.main()
+    assert seen == [str(base)]
 
 
 def test_benchmark_explicit_cuda_failure_precedes_loading(monkeypatch):

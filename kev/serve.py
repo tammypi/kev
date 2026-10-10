@@ -2,6 +2,9 @@
 
 Run: uv run --extra serve python -m kev.serve --run runs/kev --port 8008
 
+For a LoRA checkpoint, `--base /absolute/path/to/base` loads its tokenizer, config and weights from that local
+directory instead of downloading the base named in `head.pt`.
+
 TypeSafe-compatible: POST /v1/systemone, GET /v1/models, the `x-typesafe-request-id` response header, and bearer auth
 when KEV_API_KEY is set (unset = open server, the local default). Demo extras: POST /v1/systemone/permute (one Choice
 under several option orders) and POST /v1/systemone/separate (each question in its own pass, for the packed-vs-separate
@@ -301,9 +304,9 @@ def models():
     a client may ignore: the run, the base, the device, the backend and precision, the temperature, prefix-cache stats."""
     s = server()
     ck, meta = s.checkpoint, s.checkpoint.meta
-    card = {"description": f"Kev pointer head on {meta.base}, serving {ck.requested} at temperature {s.model.head.temperature:.2f}",
+    card = {"description": f"Kev pointer head on {ck.base}, serving {ck.requested} at temperature {s.model.head.temperature:.2f}",
             "release_date": s.release_date,
-            "run": ck.requested, "base": meta.base, "lora": meta.lora, "device": s.device, "backend": s.model.backend, "dtype": s.model.dtype,
+            "run": ck.requested, "base": ck.base, "checkpoint_base": meta.base, "lora": meta.lora, "device": s.device, "backend": s.model.backend, "dtype": s.model.dtype,
             "temperature": s.model.head.temperature, "max_state_tokens": SERVE_MAX_STATE, "truncate_states": s.truncate_states,
             "cuda_graphs": graphs.stats() if (graphs := getattr(s.model, "graphs", None)) else None,
             "prefix_cache": {"size": s.prefix_cache.size, "min_state_tokens": s.prefix_cache.min_tokens, "max_tokens": s.prefix_cache.max_tokens, "hits": s.prefix_cache.hits,
@@ -312,23 +315,24 @@ def models():
     return {"models": [{"name": name, **card} for name in MODEL_NAMES]}
 
 
-def _serving_device(requested, opts, run):
+def _serving_device(requested, opts, run, base=None):
     """Device and checkpoint for this process. A hybrid checkpoint on Apple Silicon with the MLX backend does not consult
     the torch MPS probe. Everywhere else the probe runs before the checkpoint is opened, so a driver crash stays in the child."""
     probe_dtype = opts.dtype or torch.bfloat16
     mlx_candidate = (sys.platform == "darwin" and requested in ("auto", "mps") and opts.backend in ("auto", "mlx")
                      and opts.dtype is not torch.float32)
     if mlx_candidate:
-        ck = Checkpoint(run)
+        ck = Checkpoint(run, base=base)
         if mlx_available() and ck.hybrid_base():
             return "mps", ck
         return select(requested, dtype=probe_dtype), ck
-    return select(requested, dtype=probe_dtype), Checkpoint(run)
+    return select(requested, dtype=probe_dtype), Checkpoint(run, base=base)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", default="runs/kev")
+    ap.add_argument("--base", help="absolute local base-model directory for a LoRA checkpoint; avoids downloading the base recorded in head.pt")
     ap.add_argument("--fallback", default="runs/smoke")
     ap.add_argument("--host", default="127.0.0.1", help="interface to bind; 0.0.0.0 to serve beyond this machine (a container, a VM behind a proxy)")
     ap.add_argument("--port", type=int, default=8008)
@@ -338,7 +342,7 @@ def main():
     if run != a.run: print(f"{a.run} not found, falling back to {run}")
     opts = LoadOptions.from_env()
     if opts.backend is None: opts = replace(opts, backend="auto")   # serving default: MLX for the hybrid Qwen3.5 checkpoints on Apple Silicon (LoadOptions.backend); KEV_BACKEND=torch to decline
-    dev, ck = _serving_device(a.device, opts, run)
+    dev, ck = _serving_device(a.device, opts, run, a.base)
     if dev == "mps" and opts.attn is None: opts = replace(opts, attn="sdpa")   # serving default on Apple GPUs (parity measured)
     if dev != "cpu" and opts.dtype is None: opts = replace(opts, dtype=torch.bfloat16)   # serving default: 2-4.5x faster than fp32 on an L4, same answers (LoadOptions.dtype); KEV_DTYPE=fp32 for the exact path
     cuda_optimizations = dev == "cuda" and torch.version.hip is None   # these serving paths are measured on NVIDIA
@@ -348,7 +352,7 @@ def main():
     tok, model = ck.load(dev, opts)
     if fused_default and not opts.fused and model.hybrid: print("fused Qwen3.5 kernels off: install the flash-linear-attention version kev/fused_qwen35.py pins (FLA_VERSION) to turn them on")
     app.state.server = Server(ck, tok, model, dev)
-    print(f"serving {ck.requested} ({ck.path}) on {dev} via {model.backend} ({model.dtype}) {a.host}:{a.port}; states over {SERVE_MAX_STATE:,} tokens "
+    print(f"serving {ck.requested} ({ck.path}) with base {ck.base} on {dev} via {model.backend} ({model.dtype}) {a.host}:{a.port}; states over {SERVE_MAX_STATE:,} tokens "
           f"{'truncated (KEV_TRUNCATE_STATES=1)' if app.state.server.truncate_states else 'refused (422)'}")   # /v1/models reports the run as given, not the resolved cache path
     import uvicorn
     uvicorn.run(app, host=a.host, port=a.port)

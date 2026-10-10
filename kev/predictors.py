@@ -105,13 +105,14 @@ class LocalPredictor:
     materialises L x L. A long record on a hybrid torch backbone also runs its state once, its questions continuing from
     it (kev.shared_prefix), instead of once per question; the MLX backend's forward already runs the state once."""
 
-    def __init__(self, run, device, opts=LoadOptions(), context=CONTEXT):
+    def __init__(self, run, device, opts=LoadOptions(), context=CONTEXT, base=None):
         """opts.temperature=None scores with the temperature the checkpoint carries; 1.0 scores raw logits. context: the
         max_state / max_branch / max_packed a record must encode within (a suite manifest's `context`; the training
-        context by default, the serving limits for external suites frozen without admission)."""
+        context by default, the serving limits for external suites frozen without admission). base is an absolute local
+        base-model directory for a LoRA checkpoint."""
         if opts.temperature is not None and not (math.isfinite(opts.temperature) and opts.temperature > 0):
             raise ValueError("temperature must be finite and positive")
-        checkpoint = self.checkpoint = Checkpoint(run)
+        checkpoint = self.checkpoint = Checkpoint(run, base=base)
         self.run = checkpoint.path
         if device == "cuda":
             # evaluation is fp32-exact: TF32 (10-bit mantissa) moves probabilities by ~1e-3, the isolation gate's tolerance

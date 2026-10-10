@@ -167,10 +167,18 @@ def fused_available():
 
 
 class Checkpoint:
-    def __init__(self, run):
+    def __init__(self, run, base=None):
         self.requested = str(run)                    # what the caller asked for (a Hub id stays a Hub id in labels)
         self.path = resolve_run(run)
         self.meta = read_meta(self.path)
+        if base is None:
+            self.base = self.meta.base
+        else:
+            path = Path(base)
+            if not path.is_absolute(): raise ValueError(f"--base must be an absolute path, got {base!r}")
+            if not path.is_dir(): raise ValueError(f"--base does not name a directory: {base}")
+            if self.full: raise ValueError("--base only applies to a LoRA checkpoint; this checkpoint contains full weights")
+            self.base = str(path)
 
     def file(self, name):
         return Path(self.path) / name
@@ -220,7 +228,7 @@ class Checkpoint:
         """Whether the backbone has Gated DeltaNet layers (Qwen3.5), read from a config without loading weights: the base's
         for a LoRA adapter, the checkpoint's own config.json for full weights (the backbone that is actually loaded)."""
         from transformers import AutoConfig
-        config = AutoConfig.from_pretrained(self.path) if self.full else AutoConfig.from_pretrained(self.meta.base, revision=self.meta.base_revision)
+        config = AutoConfig.from_pretrained(self.path) if self.full else AutoConfig.from_pretrained(self.base, revision=self.meta.base_revision)
         return is_hybrid(config.get_text_config())
 
     def backend(self, device, opts=LoadOptions()):
@@ -235,7 +243,7 @@ class Checkpoint:
         DecisionModel (torch) or an MLXDecisionModel (backend mlx); both expose the same scoring interface."""
         meta = self.meta
         if self.full and opts.lora_scale != 1: raise ValueError("lora_scale interpolates an adapter; a full-weight checkpoint has none")
-        tok = load_tokenizer(meta.base, revision=meta.base_revision)
+        tok = load_tokenizer(self.base, revision=meta.base_revision)
         m = self._load_mlx(tok, opts) if self.backend(device, opts) == "mlx" else self._load_torch(tok, device, opts)
         m.head.load_state_dict(meta.head); m.eval()
         m.head.temperature = meta.temperature if opts.temperature is None else opts.temperature
@@ -249,13 +257,13 @@ class Checkpoint:
         full = self.full
         if not full and not opts.merge: raise ValueError("the MLX backend always merges the adapter (KEV_MERGE=0 needs backend=torch)")
         if self.meta.option_isolation: raise ValueError("option_isolation needs the packed mask; not available on the MLX backend")
-        if not self.hybrid_base(): raise ValueError(f"the MLX backend is for the hybrid (Qwen3.5) bases; {self.path if full else self.meta.base} is attention-only and runs on MPS with backend=torch")
+        if not self.hybrid_base(): raise ValueError(f"the MLX backend is for the hybrid (Qwen3.5) bases; {self.path if full else self.base} is attention-only and runs on MPS with backend=torch")
         dtype = self.saved_dtype() if full else None
         from .mlx_model import MLXDecisionModel, load_base, load_full, merge_lora
         if full:
             lm = load_full(self.path, self.shards(), dtype)
         else:
-            lm = load_base(resolve_run(f"{self.meta.base}@{self.meta.base_revision or ''}"))   # the base snapshot the torch path already cached
+            lm = load_base(resolve_run(self.base))   # the base snapshot the torch path already cached
             merge_lora(lm, self.path, opts.lora_scale)
         return MLXDecisionModel(lm, pad_id(tok), head_dim=self.meta.head_dim)
 
@@ -287,7 +295,7 @@ class Checkpoint:
         """-> (model, True). Full weights load in `saved_dtype`; an explicit dtype still casts on purpose (fp32: the same
         values computed in fp32). Nothing to merge (`load` refuses lora_scale for full weights on either backend)."""
         meta = self.meta
-        return DecisionModel(meta.base, tok, device, head_dim=meta.head_dim, option_isolation=meta.option_isolation,
+        return DecisionModel(self.base, tok, device, head_dim=meta.head_dim, option_isolation=meta.option_isolation,
                              dtype=opts.dtype or getattr(torch, self.saved_dtype()), attn=opts.attn, weights=self.path), True
 
     def _adapted_torch(self, tok, device, opts):
@@ -301,7 +309,7 @@ class Checkpoint:
             # (one rounding of W + delta, as for every served Kev; parity in runs/serving-27b-*).
             dtype, merge = torch.bfloat16, merge and bool(opts.fused)
         merge = merge and not self.adapter_config().get("trainable_token_indices")   # token-trained adapters stay unmerged
-        m = DecisionModel(meta.base, tok, device, lora=None, revision=meta.base_revision, head_dim=meta.head_dim,
+        m = DecisionModel(self.base, tok, device, lora=None, revision=meta.base_revision, head_dim=meta.head_dim,
                           option_isolation=meta.option_isolation, dtype=dtype, attn=opts.attn)
         m.lm = PeftModel.from_pretrained(m.lm, self.path, torch_device=str(device)).to(device)   # trainable token embeddings, if any, live in the adapter
         if opts.lora_scale != 1:
